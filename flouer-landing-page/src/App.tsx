@@ -21,16 +21,16 @@ const products = [
   },
   {
     id: "product-03",
-    flavor: "Matcha White Chip",
+    flavor: "Red Velvet Cheesecake",
     description:
-      "Earthy matcha-infused dough with creamy white chips and roasted nut notes for a smooth, layered flavor profile.",
+      "A striking, vibrant red velvet cookie with a soft, cocoa-flavored crumb, featuring a decadent, creamy cheesecake filling hidden inside.",
     image: product03Img,
   },
   {
     id: "product-04",
-    flavor: "Red Velvet Cream Chip",
+    flavor: "Chocolate Chip",
     description:
-      "Bold cocoa-red velvet cookie with white chips for a soft, velvety crumb and a creamy finish.",
+      "The classic favorite soft and chewy on the inside, golden crisp on the outside, and loaded with premium dark chocolate chips.",
     image: product04Img,
   },
 ]
@@ -38,41 +38,26 @@ const products = [
 function App() {
   const containerRef = useRef<HTMLDivElement>(null)
   const [bannerHidden, setBannerHidden] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(0)
 
   const hideBanner = useCallback(() => {
     setBannerHidden(true)
-  }, [])
-
-  const animateTo = useCallback((targetTop: number) => {
-    const container = containerRef.current
-    if (!container) return
-
-    const startTop = container.scrollTop
-    const delta = targetTop - startTop
-    const durationMs = 620
-    const startTime = performance.now()
-
-    const tick = (time: number) => {
-      const elapsed = time - startTime
-      const progress = Math.min(elapsed / durationMs, 1)
-      const eased = 1 - Math.pow(1 - progress, 3)
-      container.scrollTop = startTop + delta * eased
-      if (progress < 1) {
-        requestAnimationFrame(tick)
-      }
-    }
-
-    requestAnimationFrame(tick)
   }, [])
 
   const scrollToIndex = useCallback((index: number) => {
     const container = containerRef.current
     if (!container) return
 
-    const count = products.length
-    const normalized = ((index % count) + count) % count
-    animateTo(normalized * container.clientHeight)
-  }, [animateTo])
+    const maxIndex = products.length - 1
+    const clamped = Math.max(0, Math.min(index, maxIndex))
+    if (clamped === activeIndex) return
+
+    container.scrollTo({
+      top: clamped * container.clientHeight,
+      behavior: "smooth",
+    })
+    setActiveIndex(clamped)
+  }, [activeIndex])
 
   const handleWheelCapture = useCallback(
     (event: WheelEvent<HTMLDivElement>) => {
@@ -88,6 +73,18 @@ function App() {
     [bannerHidden, hideBanner],
   )
 
+  const handleScroll = useCallback(() => {
+    if (!bannerHidden) return
+    const container = containerRef.current
+    if (!container) return
+    const raw = container.scrollTop / container.clientHeight
+    const maxIndex = products.length - 1
+    const clamped = Math.max(0, Math.min(Math.round(raw), maxIndex))
+    if (clamped !== activeIndex) {
+      setActiveIndex(clamped)
+    }
+  }, [activeIndex, bannerHidden])
+
   const slides = useMemo(
     () =>
       products.map((product, index) => {
@@ -101,6 +98,7 @@ function App() {
               hideBanner()
               return
             }
+            if (index >= products.length - 1) return
             scrollToIndex(index + 1)
           }}
         >
@@ -121,7 +119,7 @@ function App() {
             <p className="text-sm tracking-[0.2em] text-muted-foreground uppercase">
               {index === 0 && !bannerHidden
                 ? "First scroll hides the banner"
-                : "Scroll down for next product"}
+                : ""}
             </p>
           </div>
 
@@ -133,6 +131,8 @@ function App() {
             <img
               src={product.image}
               alt={product.flavor}
+              loading={index === 0 ? "eager" : "lazy"}
+              decoding="async"
               className="max-h-[66vh] w-full max-w-[760px] object-contain"
             />
           </div>
@@ -166,8 +166,9 @@ function App() {
         ref={containerRef}
         className={`h-screen snap-y snap-mandatory ${
           bannerHidden ? "overflow-y-auto" : "overflow-y-hidden"
-        }`}
+        } scroll-smooth`}
         onWheelCapture={handleWheelCapture}
+        onScroll={handleScroll}
       >
         {slides}
       </div>
