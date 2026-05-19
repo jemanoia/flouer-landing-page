@@ -3,7 +3,7 @@ import bpiQrImg from "@/assets/payment/bpi.png"
 import gcashQrImg from "@/assets/payment/gcash.png"
 import pnbQrImg from "@/assets/payment/pnb.png"
 import type { InvoiceData } from "@/modules/invoice/types"
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 
 type InvoicePageProps = {
   invoiceData: InvoiceData | null
@@ -65,6 +65,8 @@ const priceFormatter = new Intl.NumberFormat("en-US", {
 
 export function InvoicePage({ invoiceData, onReturnToStore }: InvoicePageProps) {
   const [selectedPaymentMethodId, setSelectedPaymentMethodId] = useState<PaymentMethodId>("gcash-qr")
+  const [copyFeedback, setCopyFeedback] = useState("")
+  const [downloadFeedback, setDownloadFeedback] = useState("")
 
   const createdAtLabel = useMemo(() => {
     if (!invoiceData) return ""
@@ -80,6 +82,58 @@ export function InvoicePage({ invoiceData, onReturnToStore }: InvoicePageProps) 
 
   const selectedPaymentMethod = useMemo(() => {
     return paymentMethods.find((method) => method.id === selectedPaymentMethodId) ?? paymentMethods[0]
+  }, [selectedPaymentMethodId])
+
+  const gcashNumber = useMemo(() => {
+    return paymentMethods.find((method) => method.id === "gcash-manual")?.manualNumber ?? ""
+  }, [])
+
+  const handleCopyGcashNumber = async () => {
+    if (!gcashNumber) {
+      setCopyFeedback("GCash number is unavailable.")
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(gcashNumber)
+      setCopyFeedback("GCash number copied.")
+    } catch {
+      setCopyFeedback("Unable to copy automatically. Please copy it manually.")
+    }
+  }
+
+  const handleDownloadQr = async () => {
+    if (!selectedPaymentMethod.qrImage) {
+      setDownloadFeedback("No QR code available for this payment method.")
+      return
+    }
+
+    const filename = `${selectedPaymentMethod.id}.png`
+
+    try {
+      const response = await fetch(selectedPaymentMethod.qrImage)
+      if (!response.ok) throw new Error("Failed to fetch QR image.")
+      const blob = await response.blob()
+      const objectUrl = URL.createObjectURL(blob)
+
+      const anchor = document.createElement("a")
+      anchor.href = objectUrl
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(objectUrl)
+
+      setDownloadFeedback("QR code download started.")
+    } catch {
+      window.open(selectedPaymentMethod.qrImage, "_blank", "noopener,noreferrer")
+      setDownloadFeedback("Opened QR in a new tab. Save it from there if download is blocked.")
+    }
+  }
+
+  useEffect(() => {
+    setCopyFeedback("")
+    setDownloadFeedback("")
   }, [selectedPaymentMethodId])
 
   return (
@@ -181,9 +235,34 @@ export function InvoicePage({ invoiceData, onReturnToStore }: InvoicePageProps) 
                   <div className="rounded-lg border border-black/10 bg-slate-50 p-4">
                     <p className="text-xs text-muted-foreground uppercase">GCash Mobile Number</p>
                     <p className="mt-2 text-2xl font-semibold tracking-wide">{selectedPaymentMethod.manualNumber}</p>
+                    <Button
+                      onClick={handleCopyGcashNumber}
+                      size="sm"
+                      className="mt-3 w-full sm:w-auto"
+                    >
+                      Copy GCash Number
+                    </Button>
+                    {copyFeedback ? (
+                      <p className="mt-2 text-xs text-muted-foreground">{copyFeedback}</p>
+                    ) : null}
                   </div>
                 )}
               </div>
+
+              {selectedPaymentMethod.qrImage ? (
+                <div className="mt-3">
+                  <Button
+                    onClick={handleDownloadQr}
+                    size="sm"
+                    className="w-full sm:w-auto"
+                  >
+                    Download QR Code
+                  </Button>
+                  {downloadFeedback ? (
+                    <p className="mt-2 text-xs text-muted-foreground">{downloadFeedback}</p>
+                  ) : null}
+                </div>
+              ) : null}
 
               <p className="mt-4 text-xs text-muted-foreground">{selectedPaymentMethod.instructions}</p>
               <p className="mt-1 text-xs text-muted-foreground">
