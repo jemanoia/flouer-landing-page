@@ -1,9 +1,17 @@
 import { Button } from "@/components/ui/button"
+import {
+  buildInvoice,
+  buildOrderEmailHtml,
+  INVOICE_STORAGE_KEY,
+  InvoicePage,
+  readStoredInvoice,
+  type InvoiceData,
+} from "@/modules/invoice"
 import product01Img from "@/assets/product-01.png"
 import product02Img from "@/assets/product-02.png"
 import product03Img from "@/assets/product-03.png"
 import product04Img from "@/assets/product-04.png"
-import { useCallback, useMemo, useRef, useState, type WheelEvent } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent } from "react"
 
 type Product = {
   id: string
@@ -12,6 +20,13 @@ type Product = {
   image: string
   price: number
 }
+
+type CartItem = Product & {
+  quantity: number
+  lineTotal: number
+}
+
+type ViewMode = "storefront" | "invoice"
 
 const products: Product[] = [
   {
@@ -48,7 +63,12 @@ const products: Product[] = [
   },
 ]
 
-const ORDER_EMAIL = "orders@flouer.com"
+const ORDER_EMAIL = "skwakadood@gmail.com"
+const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL ?? "").replace(/\/$/, "")
+const SUPABASE_ANON_KEY =
+  import.meta.env.VITE_SUPABASE_ANON_KEY ??
+  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ??
+  ""
 const priceFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "PHP",
@@ -62,6 +82,14 @@ function App() {
   const [activeIndex, setActiveIndex] = useState(0)
   const [cart, setCart] = useState<Record<string, number>>({})
   const [cartOpen, setCartOpen] = useState(false)
+  const [checkoutConfirmOpen, setCheckoutConfirmOpen] = useState(false)
+  const [cartVerified, setCartVerified] = useState(false)
+  const [checkoutSubmitting, setCheckoutSubmitting] = useState(false)
+  const [checkoutError, setCheckoutError] = useState("")
+  const [viewMode, setViewMode] = useState<ViewMode>(() =>
+    window.location.hash === "#invoice" ? "invoice" : "storefront",
+  )
+  const [invoiceData, setInvoiceData] = useState<InvoiceData | null>(null)
 
   const hideBanner = useCallback(() => {
     setBannerHidden(true)
@@ -92,18 +120,6 @@ function App() {
     },
     [activeIndex],
   )
-
-  const browseMenu = useCallback(() => {
-    if (!bannerHidden) {
-      hideBanner()
-      const container = containerRef.current
-      if (container) {
-        container.scrollTo({ top: 0, behavior: "smooth" })
-      }
-      return
-    }
-    scrollToIndex(0)
-  }, [bannerHidden, hideBanner, scrollToIndex])
 
   const addToCart = useCallback((productId: string) => {
     setCart((previous) => ({
@@ -153,7 +169,7 @@ function App() {
     }
   }, [activeIndex, bannerHidden])
 
-  const cartItems = useMemo(() => {
+  const cartItems = useMemo<CartItem[]>(() => {
     return products
       .map((product) => {
         const quantity = cart[product.id] ?? 0
@@ -174,26 +190,100 @@ function App() {
     return cartItems.reduce((sum, item) => sum + item.lineTotal, 0)
   }, [cartItems])
 
-  const checkoutHref = useMemo(() => {
-    if (cartItems.length === 0) return ""
+  useEffect(() => {
+    const handleHashChange = () => {
+      setViewMode(window.location.hash === "#invoice" ? "invoice" : "storefront")
+    }
 
-    const orderLines = cartItems.map(
-      (item) => `- ${item.flavor} x${item.quantity} (${priceFormatter.format(item.lineTotal)})`,
-    )
+    window.addEventListener("hashchange", handleHashChange)
+    return () => {
+      window.removeEventListener("hashchange", handleHashChange)
+    }
+  }, [])
 
-    const mailBody = [
-      "Hi Flouer team,",
-      "",
-      "I would like to place an order:",
-      ...orderLines,
-      "",
-      `Subtotal: ${priceFormatter.format(subtotal)}`,
-      "",
-      "Please confirm availability and payment instructions.",
-    ].join("\n")
+  useEffect(() => {
+    if (viewMode !== "invoice") return
+    setInvoiceData(readStoredInvoice())
+  }, [viewMode])
 
-    return `mailto:${ORDER_EMAIL}?subject=${encodeURIComponent("Flouer Cookie Order")}&body=${encodeURIComponent(mailBody)}`
-  }, [cartItems, subtotal])
+  useEffect(() => {
+    setCartVerified(false)
+  }, [cart])
+
+  const openCheckoutConfirmation = useCallback(() => {
+    if (cartItems.length === 0) return
+    setCheckoutError("")
+    setCheckoutConfirmOpen(true)
+  }, [cartItems.length])
+
+  const proceedToCheckout = useCallback(async () => {
+    if (!cartVerified || cartItems.length === 0 || checkoutSubmitting) return
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+      setCheckoutError("Checkout is unavailable. Missing Supabase client configuration.")
+      return
+    }
+
+    const nextInvoice = buildInvoice(cartItems, subtotal)
+    const subject = `Flouer Cookie Order ${nextInvoice.invoiceNumber}`
+    const html = buildOrderEmailHtml(cartItems, subtotal, nextInvoice.invoiceNumber)
+
+    setCheckoutSubmitting(true)
+    setCheckoutError("")
+
+    try {
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/resend-email`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({
+          subject,
+          html,
+        }),
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as
+          | { error?: string; details?: { message?: string } }
+          | null
+
+        const message =
+          payload?.details?.message ??
+          payload?.error ??
+          `Checkout request failed with status ${response.status}.`
+
+        throw new Error(message)
+      }
+
+      sessionStorage.setItem(INVOICE_STORAGE_KEY, JSON.stringify(nextInvoice))
+      setInvoiceData(nextInvoice)
+      window.location.hash = "#invoice"
+
+      setCart({})
+      setCartOpen(false)
+      setCheckoutConfirmOpen(false)
+    } catch (error) {
+      console.error("Failed to invoke resend-email function", error)
+      if (error instanceof Error && error.message.trim().length > 0) {
+        setCheckoutError(error.message)
+      } else {
+        setCheckoutError("Unable to submit your order right now. Please try again.")
+      }
+    } finally {
+      setCheckoutSubmitting(false)
+    }
+  }, [cartItems, cartVerified, checkoutSubmitting, subtotal])
+
+  const continueEditingCart = useCallback(() => {
+    setCheckoutConfirmOpen(false)
+  }, [])
+
+  const returnToStore = useCallback(() => {
+    window.location.hash = ""
+    setViewMode("storefront")
+  }, [])
 
   const slides = useMemo(
     () =>
@@ -260,11 +350,26 @@ function App() {
     [addToCart, bannerHidden, hideBanner, scrollToIndex],
   )
 
+  if (viewMode === "invoice") {
+    return (
+      <InvoicePage
+        invoiceData={invoiceData}
+        onReturnToStore={returnToStore}
+      />
+    )
+  }
+
   return (
     <main className="relative h-screen overflow-hidden bg-background text-foreground">
       <nav className="absolute top-0 left-0 z-30 w-full px-4 pt-8 sm:px-8 sm:pt-10 lg:px-14 lg:pt-12">
         <div className="relative mx-auto flex w-full max-w-6xl items-center rounded-full border border-black/10 bg-white/85 px-4 py-3 backdrop-blur sm:px-5 sm:py-3.5">
-          <div className="flex flex-1 items-center">
+          <div className="flex flex-1 items-center justify-start">
+            <Button variant="ghost" onClick={showBanner}>
+              Home
+            </Button>
+          </div>
+
+          <div className="flex items-center justify-center">
             <button
               type="button"
               className="flex items-center gap-3"
@@ -278,19 +383,7 @@ function App() {
             </button>
           </div>
 
-          <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-2 md:flex">
-            <Button variant="ghost" onClick={showBanner}>
-              Home
-            </Button>
-            <Button variant="ghost" onClick={browseMenu}>
-              Menu
-            </Button>
-          </div>
-
           <div className="flex flex-1 items-center justify-end gap-2">
-            <Button variant="outline" onClick={browseMenu}>
-              Browse
-            </Button>
             <Button onClick={() => setCartOpen(true)}>Buy ({cartCount})</Button>
           </div>
         </div>
@@ -367,8 +460,9 @@ function App() {
             <p className="text-base font-semibold">{priceFormatter.format(subtotal)}</p>
           </div>
 
-          <a
-            href={checkoutHref || undefined}
+          <button
+            type="button"
+            onClick={openCheckoutConfirmation}
             className={`inline-flex h-10 w-full items-center justify-center rounded-lg text-sm font-medium transition-colors ${
               cartItems.length > 0
                 ? "bg-black text-white hover:bg-black/85"
@@ -376,12 +470,47 @@ function App() {
             }`}
           >
             Checkout
-          </a>
+          </button>
           <p className="text-xs text-muted-foreground">
-            Checkout sends your order details to {ORDER_EMAIL}.
+            Checkout sends your order details to {ORDER_EMAIL} using Supabase Edge Functions.
           </p>
         </div>
       </aside>
+
+      {checkoutConfirmOpen ? (
+        <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/45 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-black/10 bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-semibold">Confirm Your Cart</h3>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Please review your cart items before checkout. If you still need changes, continue editing to add,
+              remove, or update quantities.
+            </p>
+
+            <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-black/10 p-3">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4"
+                checked={cartVerified}
+                onChange={(event) => setCartVerified(event.target.checked)}
+              />
+              <span className="text-sm">I have verified all items and quantities in my cart.</span>
+            </label>
+            {checkoutError ? <p className="mt-3 text-sm text-red-600">{checkoutError}</p> : null}
+
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <Button variant="outline" onClick={continueEditingCart} disabled={checkoutSubmitting}>
+                Continue Editing Cart
+              </Button>
+              <Button
+                onClick={proceedToCheckout}
+                disabled={!cartVerified || checkoutSubmitting}
+              >
+                {checkoutSubmitting ? "Submitting..." : "Proceed To Checkout"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   )
 }
