@@ -1,4 +1,4 @@
-import type { InvoiceData, InvoiceLineItem } from "@/modules/invoice/types"
+import type { CheckoutCustomerInfo, InvoiceData, InvoiceLineItem } from "@/modules/invoice/types"
 
 export const INVOICE_STORAGE_KEY = "flouer:last-invoice"
 export const PAYMENT_RECEIVER = "Flouer GCash 0917-123-4567"
@@ -22,6 +22,7 @@ export const buildOrderEmailHtml = (
   items: InvoiceLineItem[],
   subtotal: number,
   invoiceNumber: string,
+  customer: CheckoutCustomerInfo,
 ) => {
   const placedAt = new Intl.DateTimeFormat("en-PH", {
     dateStyle: "medium",
@@ -55,6 +56,34 @@ export const buildOrderEmailHtml = (
                 <p style="margin: 0; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.88;">Flouer New Order</p>
                 <h1 style="margin: 8px 0 0; font-size: 28px; line-height: 1.2; letter-spacing: 0.01em;">Order ${escapeHtml(invoiceNumber)}</h1>
                 <p style="margin: 8px 0 0; font-size: 14px; opacity: 0.9;">Placed on ${escapeHtml(placedAt)}</p>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 24px 28px 0;">
+                <h2 style="margin: 0; font-size: 14px; letter-spacing: 0.08em; text-transform: uppercase; color: #7f6d61;">Customer Information</h2>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse: collapse; margin-top: 10px;">
+                  <tr>
+                    <td style="padding: 4px 0; color: #6a5a50; font-size: 13px;">Name</td>
+                    <td style="padding: 4px 0; color: #2c2420; font-size: 13px; font-weight: 600; text-align: right;">
+                      ${escapeHtml(
+                        `${customer.firstName} ${customer.middleName ? `${customer.middleName} ` : ""}${customer.lastName}`,
+                      )}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 0; color: #6a5a50; font-size: 13px;">Address</td>
+                    <td style="padding: 4px 0; color: #2c2420; font-size: 13px; font-weight: 600; text-align: right;">${escapeHtml(customer.address)}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 0; color: #6a5a50; font-size: 13px;">Email</td>
+                    <td style="padding: 4px 0; color: #2c2420; font-size: 13px; font-weight: 600; text-align: right;">${escapeHtml(customer.email)}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 4px 0; color: #6a5a50; font-size: 13px;">Phone</td>
+                    <td style="padding: 4px 0; color: #2c2420; font-size: 13px; font-weight: 600; text-align: right;">${escapeHtml(customer.phoneNumber)}</td>
+                  </tr>
+                </table>
               </td>
             </tr>
 

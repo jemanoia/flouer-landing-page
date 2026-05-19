@@ -3,11 +3,13 @@ import bpiQrImg from "@/assets/payment/bpi.png"
 import gcashQrImg from "@/assets/payment/gcash.png"
 import pnbQrImg from "@/assets/payment/pnb.png"
 import type { InvoiceData } from "@/modules/invoice/types"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, type ChangeEvent } from "react"
 
 type InvoicePageProps = {
   invoiceData: InvoiceData | null
   onReturnToStore: () => void
+  supabaseUrl: string
+  supabaseAnonKey: string
 }
 
 type PaymentMethodId = "gcash-qr" | "pnb-qr" | "bpi-qr" | "gcash-manual"
@@ -63,10 +65,38 @@ const priceFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 })
 
-export function InvoicePage({ invoiceData, onReturnToStore }: InvoicePageProps) {
+const MAX_RECEIPT_FILE_SIZE_BYTES = 10 * 1024 * 1024
+const ALLOWED_RECEIPT_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "application/pdf"] as const
+const PAYMENT_RECEIPTS_BUCKET = "payment-receipts"
+const RECEIPT_UPLOAD_SUCCESS_MESSAGE = "Receipt uploaded. We will verify your payment shortly."
+
+const sanitizePathPart = (value: string) => {
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+
+  return normalized.length > 0 ? normalized : "receipt"
+}
+
+const buildReceiptObjectPath = (invoiceNumber: string, fileName: string) => {
+  const invoiceSegment = sanitizePathPart(invoiceNumber)
+  const extensionMatch = fileName.toLowerCase().match(/\.([a-z0-9]{1,12})$/)
+  const extension = extensionMatch ? `.${extensionMatch[1]}` : ""
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
+  const randomSuffix = Math.random().toString(36).slice(2, 10)
+  return `${invoiceSegment}/${timestamp}-${randomSuffix}${extension}`
+}
+
+export function InvoicePage({ invoiceData, onReturnToStore, supabaseUrl, supabaseAnonKey }: InvoicePageProps) {
   const [selectedPaymentMethodId, setSelectedPaymentMethodId] = useState<PaymentMethodId>("gcash-qr")
   const [copyFeedback, setCopyFeedback] = useState("")
   const [downloadFeedback, setDownloadFeedback] = useState("")
+  const [selectedReceiptFile, setSelectedReceiptFile] = useState<File | null>(null)
+  const [receiptUploadFeedback, setReceiptUploadFeedback] = useState("")
+  const [receiptUploading, setReceiptUploading] = useState(false)
+  const [receiptInputResetKey, setReceiptInputResetKey] = useState(0)
 
   const createdAtLabel = useMemo(() => {
     if (!invoiceData) return ""
@@ -131,6 +161,138 @@ export function InvoicePage({ invoiceData, onReturnToStore }: InvoicePageProps) 
     }
   }
 
+  const handleReceiptFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const nextFile = event.target.files?.[0] ?? null
+
+    if (!nextFile) {
+      setSelectedReceiptFile(null)
+      setReceiptUploadFeedback("")
+      return
+    }
+
+    if (!ALLOWED_RECEIPT_MIME_TYPES.includes(nextFile.type as (typeof ALLOWED_RECEIPT_MIME_TYPES)[number])) {
+      setSelectedReceiptFile(null)
+      setReceiptUploadFeedback("Unsupported file type. Please upload JPG, PNG, WEBP, or PDF.")
+      return
+    }
+
+    if (nextFile.size > MAX_RECEIPT_FILE_SIZE_BYTES) {
+      setSelectedReceiptFile(null)
+      setReceiptUploadFeedback("File is too large. Maximum allowed size is 10MB.")
+      return
+    }
+
+    setSelectedReceiptFile(nextFile)
+    setReceiptUploadFeedback("")
+  }
+
+  const handleUploadReceipt = async () => {
+    if (!invoiceData) {
+      setReceiptUploadFeedback("Invoice is unavailable. Please return to store and checkout again.")
+      return
+    }
+
+    if (!selectedReceiptFile) {
+      setReceiptUploadFeedback("Please choose a receipt file first.")
+      return
+    }
+
+    if (!supabaseUrl || !supabaseAnonKey) {
+      setReceiptUploadFeedback("Upload is unavailable. Missing Supabase configuration.")
+      return
+    }
+
+    const objectPath = buildReceiptObjectPath(invoiceData.invoiceNumber, selectedReceiptFile.name)
+    const normalizedContentType =
+      selectedReceiptFile.type && selectedReceiptFile.type.trim().length > 0
+        ? selectedReceiptFile.type
+        : "application/octet-stream"
+
+    setReceiptUploading(true)
+    setReceiptUploadFeedback("")
+    let uploadCompleted = false
+
+    try {
+      const uploadResponse = await fetch(
+        `${supabaseUrl}/storage/v1/object/${PAYMENT_RECEIPTS_BUCKET}/${objectPath}`,
+        {
+          method: "POST",
+          headers: {
+            apikey: supabaseAnonKey,
+            Authorization: `Bearer ${supabaseAnonKey}`,
+            "Content-Type": normalizedContentType,
+          },
+          body: selectedReceiptFile,
+        },
+      )
+
+      if (!uploadResponse.ok) {
+        const uploadError = (await uploadResponse.json().catch(() => null)) as
+          | { message?: string; error?: string }
+          | null
+
+        const message =
+          uploadError?.message ??
+          uploadError?.error ??
+          `Receipt upload failed with status ${uploadResponse.status}.`
+
+        throw new Error(message)
+      }
+      uploadCompleted = true
+
+      const verifyResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/verify_sale_payment`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: supabaseAnonKey,
+          Authorization: `Bearer ${supabaseAnonKey}`,
+        },
+        body: JSON.stringify({
+          p_invoice_number: invoiceData.invoiceNumber,
+          p_receipt_file_path: objectPath,
+          p_receipt_content_type: normalizedContentType,
+          p_receipt_uploaded_by: "user",
+        }),
+      })
+
+      if (!verifyResponse.ok) {
+        const verifyError = (await verifyResponse.json().catch(() => null)) as
+          | { message?: string; error?: string; details?: string }
+          | null
+
+        const message =
+          verifyError?.message ??
+          verifyError?.error ??
+          verifyError?.details ??
+          `Saving receipt metadata failed with status ${verifyResponse.status}.`
+
+        throw new Error(message)
+      }
+
+      setSelectedReceiptFile(null)
+      setReceiptInputResetKey((previous) => previous + 1)
+      setReceiptUploadFeedback(RECEIPT_UPLOAD_SUCCESS_MESSAGE)
+    } catch (error) {
+      if (uploadCompleted) {
+        await fetch(`${supabaseUrl}/storage/v1/object/${PAYMENT_RECEIPTS_BUCKET}/${objectPath}`, {
+          method: "DELETE",
+          headers: {
+            apikey: supabaseAnonKey,
+            Authorization: `Bearer ${supabaseAnonKey}`,
+          },
+        }).catch(() => null)
+      }
+
+      if (error instanceof Error && error.message.trim().length > 0) {
+        setReceiptUploadFeedback(error.message)
+      } else {
+        setReceiptUploadFeedback("Unable to upload receipt right now. Please try again.")
+      }
+    } finally {
+      setReceiptUploading(false)
+    }
+  }
+
   useEffect(() => {
     setCopyFeedback("")
     setDownloadFeedback("")
@@ -156,118 +318,150 @@ export function InvoicePage({ invoiceData, onReturnToStore }: InvoicePageProps) 
             </p>
           </div>
         ) : (
-          <div className="mt-6 grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-            <section className="space-y-4">
-              <div className="grid gap-2 rounded-2xl border border-black/10 p-4 text-sm sm:grid-cols-2">
-                <p>
-                  <span className="block text-xs text-muted-foreground uppercase">Invoice Number</span>
-                  <span className="font-semibold">{invoiceData.invoiceNumber}</span>
-                </p>
-                <p>
-                  <span className="block text-xs text-muted-foreground uppercase">Created</span>
-                  <span className="font-semibold">{createdAtLabel}</span>
-                </p>
-              </div>
+          <div className="mt-6 space-y-6">
+            <div className="grid gap-6 lg:grid-cols-12 lg:items-start">
+              <section className="space-y-4 lg:col-span-5">
+                <div className="grid gap-2 rounded-2xl border border-black/10 p-4 text-sm sm:grid-cols-2">
+                  <p>
+                    <span className="block text-xs text-muted-foreground uppercase">Invoice Number</span>
+                    <span className="font-semibold">{invoiceData.invoiceNumber}</span>
+                  </p>
+                  <p>
+                    <span className="block text-xs text-muted-foreground uppercase">Created</span>
+                    <span className="font-semibold">{createdAtLabel}</span>
+                  </p>
+                </div>
 
-              <div className="rounded-2xl border border-black/10 p-4">
-                <h2 className="text-sm font-semibold tracking-wide uppercase">Order Items</h2>
-                <div className="mt-3 space-y-3">
-                  {invoiceData.items.map((item) => (
-                    <div key={item.id} className="flex items-start justify-between gap-4 border-b border-black/10 pb-3">
-                      <div>
-                        <p className="text-sm font-semibold">{item.flavor}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {priceFormatter.format(item.price)} x {item.quantity}
-                        </p>
+                <div className="rounded-2xl border border-black/10 p-4">
+                  <h2 className="text-sm font-semibold tracking-wide uppercase">Order Items</h2>
+                  <div className="mt-3 space-y-3">
+                    {invoiceData.items.map((item) => (
+                      <div key={item.id} className="flex items-start justify-between gap-4 border-b border-black/10 pb-3">
+                        <div>
+                          <p className="text-sm font-semibold">{item.flavor}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {priceFormatter.format(item.price)} x {item.quantity}
+                          </p>
+                        </div>
+                        <p className="text-sm font-semibold">{priceFormatter.format(item.lineTotal)}</p>
                       </div>
-                      <p className="text-sm font-semibold">{priceFormatter.format(item.lineTotal)}</p>
+                    ))}
+                  </div>
+                  <div className="mt-4 flex items-center justify-between border-t border-black/10 pt-3">
+                    <p className="text-sm tracking-wide uppercase">Subtotal</p>
+                    <p className="text-base font-semibold">{priceFormatter.format(invoiceData.subtotal)}</p>
+                  </div>
+                </div>
+              </section>
+
+              <section className="space-y-4 lg:col-span-7">
+                <div className="rounded-2xl border border-black/10 p-4">
+                  <h2 className="text-sm font-semibold tracking-wide uppercase">Choose Payment Method</h2>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Select where you want to send payment: GCash, PNB, BPI, or direct GCash number.
+                  </p>
+
+                  <div className="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-4">
+                    {paymentMethods.map((method) => (
+                      <button
+                        key={method.id}
+                        type="button"
+                        onClick={() => setSelectedPaymentMethodId(method.id)}
+                        className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                          selectedPaymentMethod.id === method.id
+                            ? "border-black bg-black text-white"
+                            : "border-black/10 bg-white hover:border-black/25"
+                        }`}
+                        aria-pressed={selectedPaymentMethod.id === method.id}
+                      >
+                        <p className="text-xs font-semibold uppercase">{method.label}</p>
+                        <p
+                          className={`text-[11px] ${
+                            selectedPaymentMethod.id === method.id ? "text-white/80" : "text-muted-foreground"
+                          }`}
+                        >
+                          {method.description}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-black/10 bg-white p-4">
+                  {selectedPaymentMethod.qrImage ? (
+                    <div className="space-y-3">
+                      <div className="flex justify-center">
+                        <img
+                          src={selectedPaymentMethod.qrImage}
+                          alt={selectedPaymentMethod.qrAlt ?? "Payment QR code"}
+                          className="w-full max-w-[320px] rounded-lg border border-black/10 object-contain"
+                        />
+                      </div>
+                      <Button onClick={handleDownloadQr} size="sm" className="w-full sm:w-auto">
+                        Download QR Code
+                      </Button>
+                      {downloadFeedback ? (
+                        <p className="text-xs text-muted-foreground">{downloadFeedback}</p>
+                      ) : null}
                     </div>
-                  ))}
-                </div>
-                <div className="mt-4 flex items-center justify-between border-t border-black/10 pt-3">
-                  <p className="text-sm tracking-wide uppercase">Subtotal</p>
-                  <p className="text-base font-semibold">{priceFormatter.format(invoiceData.subtotal)}</p>
-                </div>
-              </div>
-            </section>
+                  ) : (
+                    <div className="rounded-lg border border-black/10 bg-slate-50 p-4">
+                      <p className="text-xs text-muted-foreground uppercase">GCash Mobile Number</p>
+                      <p className="mt-2 text-2xl font-semibold tracking-wide">{selectedPaymentMethod.manualNumber}</p>
+                      <Button onClick={handleCopyGcashNumber} size="sm" className="mt-3 w-full sm:w-auto">
+                        Copy GCash Number
+                      </Button>
+                      {copyFeedback ? (
+                        <p className="mt-2 text-xs text-muted-foreground">{copyFeedback}</p>
+                      ) : null}
+                    </div>
+                  )}
 
-            <section className="rounded-2xl border border-black/10 p-4">
-              <h2 className="text-sm font-semibold tracking-wide uppercase">Choose Payment Method</h2>
-              <p className="mt-2 text-xs text-muted-foreground">
-                Select where you want to send payment: GCash, PNB, BPI, or direct GCash number.
+                  <p className="mt-4 text-xs text-muted-foreground">{selectedPaymentMethod.instructions}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    After payment, upload your payment receipt below together with your invoice number.
+                  </p>
+                </div>
+              </section>
+            </div>
+
+            <section className="rounded-2xl border border-black/10 bg-slate-50 p-4">
+              <h2 className="text-sm font-semibold tracking-wide uppercase">Upload Payment Receipt</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Accepted formats: JPG, PNG, WEBP, PDF (max 10MB).
               </p>
-
-              <div className="mt-4 grid grid-cols-2 gap-2">
-                {paymentMethods.map((method) => (
-                  <button
-                    key={method.id}
-                    type="button"
-                    onClick={() => setSelectedPaymentMethodId(method.id)}
-                    className={`rounded-lg border px-3 py-2 text-left transition-colors ${
-                      selectedPaymentMethod.id === method.id
-                        ? "border-black bg-black text-white"
-                        : "border-black/10 bg-white hover:border-black/25"
-                    }`}
-                    aria-pressed={selectedPaymentMethod.id === method.id}
-                  >
-                    <p className="text-xs font-semibold uppercase">{method.label}</p>
-                    <p
-                      className={`text-[11px] ${
-                        selectedPaymentMethod.id === method.id ? "text-white/80" : "text-muted-foreground"
-                      }`}
-                    >
-                      {method.description}
+              <input
+                key={receiptInputResetKey}
+                type="file"
+                accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf"
+                onChange={handleReceiptFileChange}
+                className="mt-3 block w-full cursor-pointer rounded-lg border border-black/10 bg-white p-2 text-xs"
+              />
+              {selectedReceiptFile ? (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Selected file: <span className="font-medium text-foreground">{selectedReceiptFile.name}</span>
+                </p>
+              ) : null}
+              <Button
+                onClick={handleUploadReceipt}
+                size="sm"
+                className="mt-3 w-full sm:w-auto"
+                disabled={receiptUploading || !invoiceData}
+              >
+                {receiptUploading ? "Uploading..." : "Upload Receipt"}
+              </Button>
+              {receiptUploadFeedback ? (
+                receiptUploadFeedback === RECEIPT_UPLOAD_SUCCESS_MESSAGE ? (
+                  <div className="mt-3 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2">
+                    <p className="text-sm font-semibold text-emerald-900">{receiptUploadFeedback}</p>
+                    <p className="mt-1 text-xs text-emerald-800">
+                      Once payment is confirmed, a confirmation email will be sent to the email address you submitted.
                     </p>
-                  </button>
-                ))}
-              </div>
-
-              <div className="mt-4 rounded-xl border border-black/10 bg-white p-3">
-                {selectedPaymentMethod.qrImage ? (
-                  <div className="flex justify-center">
-                    <img
-                      src={selectedPaymentMethod.qrImage}
-                      alt={selectedPaymentMethod.qrAlt ?? "Payment QR code"}
-                      className="w-full max-w-[320px] rounded-lg border border-black/10 object-contain"
-                    />
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-black/10 bg-slate-50 p-4">
-                    <p className="text-xs text-muted-foreground uppercase">GCash Mobile Number</p>
-                    <p className="mt-2 text-2xl font-semibold tracking-wide">{selectedPaymentMethod.manualNumber}</p>
-                    <Button
-                      onClick={handleCopyGcashNumber}
-                      size="sm"
-                      className="mt-3 w-full sm:w-auto"
-                    >
-                      Copy GCash Number
-                    </Button>
-                    {copyFeedback ? (
-                      <p className="mt-2 text-xs text-muted-foreground">{copyFeedback}</p>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-
-              {selectedPaymentMethod.qrImage ? (
-                <div className="mt-3">
-                  <Button
-                    onClick={handleDownloadQr}
-                    size="sm"
-                    className="w-full sm:w-auto"
-                  >
-                    Download QR Code
-                  </Button>
-                  {downloadFeedback ? (
-                    <p className="mt-2 text-xs text-muted-foreground">{downloadFeedback}</p>
-                  ) : null}
-                </div>
+                  <p className="mt-2 text-xs text-red-600">{receiptUploadFeedback}</p>
+                )
               ) : null}
-
-              <p className="mt-4 text-xs text-muted-foreground">{selectedPaymentMethod.instructions}</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                After payment, send your payment proof and invoice number to complete your order.
-              </p>
             </section>
           </div>
         )}

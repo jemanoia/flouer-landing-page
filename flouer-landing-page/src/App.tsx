@@ -11,6 +11,7 @@ import {
   INVOICE_STORAGE_KEY,
   InvoicePage,
   readStoredInvoice,
+  type CheckoutCustomerInfo,
   type InvoiceData,
 } from "@/modules/invoice"
 import product01Img from "@/assets/product-01.png"
@@ -71,6 +72,8 @@ const products: Product[] = [
 
 const ORDER_EMAIL = "skwakadood@gmail.com"
 const MOBILE_BREAKPOINT = "(max-width: 767px)"
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const PHONE_REGEX = /^\+?[0-9 ()-]{7,20}$/
 const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL ?? "").replace(/\/$/, "")
 const SUPABASE_ANON_KEY =
   import.meta.env.VITE_SUPABASE_ANON_KEY ??
@@ -83,6 +86,15 @@ const priceFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 })
 
+const emptyCustomerInfo: CheckoutCustomerInfo = {
+  firstName: "",
+  middleName: "",
+  lastName: "",
+  address: "",
+  email: "",
+  phoneNumber: "",
+}
+
 function App() {
   const containerRef = useRef<HTMLDivElement>(null)
   const [isMobile, setIsMobile] = useState(() => window.matchMedia(MOBILE_BREAKPOINT).matches)
@@ -93,6 +105,8 @@ function App() {
   const [cartOpen, setCartOpen] = useState(false)
   const [checkoutConfirmOpen, setCheckoutConfirmOpen] = useState(false)
   const [cartVerified, setCartVerified] = useState(false)
+  const [checkoutCustomerInfo, setCheckoutCustomerInfo] =
+    useState<CheckoutCustomerInfo>(emptyCustomerInfo)
   const [checkoutSubmitting, setCheckoutSubmitting] = useState(false)
   const [checkoutError, setCheckoutError] = useState("")
   const [viewMode, setViewMode] = useState<ViewMode>(() =>
@@ -274,6 +288,58 @@ function App() {
     setCheckoutConfirmOpen(true)
   }, [cartItems.length])
 
+  const updateCheckoutCustomerInfo = useCallback(
+    (key: keyof CheckoutCustomerInfo, value: string) => {
+      setCheckoutError("")
+      setCheckoutCustomerInfo((previous) => ({
+        ...previous,
+        [key]: value,
+      }))
+    },
+    [],
+  )
+
+  const buildValidatedCustomerInfo = useCallback(() => {
+    const normalized: CheckoutCustomerInfo = {
+      firstName: checkoutCustomerInfo.firstName.trim(),
+      middleName: checkoutCustomerInfo.middleName.trim(),
+      lastName: checkoutCustomerInfo.lastName.trim(),
+      address: checkoutCustomerInfo.address.trim(),
+      email: checkoutCustomerInfo.email.trim().toLowerCase(),
+      phoneNumber: checkoutCustomerInfo.phoneNumber.trim(),
+    }
+
+    if (!normalized.firstName) {
+      throw new Error("First name is required.")
+    }
+
+    if (!normalized.lastName) {
+      throw new Error("Last name is required.")
+    }
+
+    if (!normalized.address) {
+      throw new Error("Address is required.")
+    }
+
+    if (!normalized.email) {
+      throw new Error("Email address is required.")
+    }
+
+    if (!EMAIL_REGEX.test(normalized.email)) {
+      throw new Error("Please provide a valid email address.")
+    }
+
+    if (!normalized.phoneNumber) {
+      throw new Error("Mobile number is required.")
+    }
+
+    if (!PHONE_REGEX.test(normalized.phoneNumber)) {
+      throw new Error("Please provide a valid mobile number.")
+    }
+
+    return normalized
+  }, [checkoutCustomerInfo])
+
   const proceedToCheckout = useCallback(async () => {
     if (!cartVerified || cartItems.length === 0 || checkoutSubmitting) return
     if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
@@ -281,9 +347,33 @@ function App() {
       return
     }
 
+    let validatedCustomerInfo: CheckoutCustomerInfo
+    try {
+      validatedCustomerInfo = buildValidatedCustomerInfo()
+    } catch (error) {
+      if (error instanceof Error && error.message.trim().length > 0) {
+        setCheckoutError(error.message)
+      } else {
+        setCheckoutError("Please complete your contact details before checkout.")
+      }
+      return
+    }
+
     const nextInvoice = buildInvoice(cartItems, subtotal)
+    const salePayload = {
+      invoiceNumber: nextInvoice.invoiceNumber,
+      createdAt: nextInvoice.createdAt,
+      subtotal: nextInvoice.subtotal,
+      items: nextInvoice.items,
+      customer: validatedCustomerInfo,
+    }
     const subject = `Flouer Cookie Order ${nextInvoice.invoiceNumber}`
-    const html = buildOrderEmailHtml(cartItems, subtotal, nextInvoice.invoiceNumber)
+    const html = buildOrderEmailHtml(
+      cartItems,
+      subtotal,
+      nextInvoice.invoiceNumber,
+      validatedCustomerInfo,
+    )
 
     setCheckoutSubmitting(true)
     setCheckoutError("")
@@ -299,6 +389,7 @@ function App() {
         body: JSON.stringify({
           subject,
           html,
+          sale: salePayload,
         }),
       })
 
@@ -315,6 +406,43 @@ function App() {
         throw new Error(message)
       }
 
+      // Temporary safety net: directly persist the sales record while remote Edge Function
+      // deployment may still be on an older email-only version.
+      const persistResponse = await fetch(`${SUPABASE_URL}/rest/v1/rpc/record_sale_and_adjust_inventory`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({
+          p_invoice_number: salePayload.invoiceNumber,
+          p_invoice_created_at: salePayload.createdAt,
+          p_checkout_subtotal: salePayload.subtotal,
+          p_line_items: salePayload.items,
+          p_customer_first_name: salePayload.customer.firstName,
+          p_customer_middle_name: salePayload.customer.middleName || null,
+          p_customer_last_name: salePayload.customer.lastName,
+          p_customer_address: salePayload.customer.address,
+          p_customer_email: salePayload.customer.email,
+          p_customer_phone: salePayload.customer.phoneNumber,
+        }),
+      })
+
+      if (!persistResponse.ok) {
+        const payload = (await persistResponse.json().catch(() => null)) as
+          | { message?: string; error?: string; details?: string }
+          | null
+
+        const message =
+          payload?.message ??
+          payload?.error ??
+          payload?.details ??
+          `Saving sales record failed with status ${persistResponse.status}.`
+
+        throw new Error(message)
+      }
+
       sessionStorage.setItem(INVOICE_STORAGE_KEY, JSON.stringify(nextInvoice))
       setInvoiceData(nextInvoice)
       window.location.hash = "#invoice"
@@ -322,6 +450,8 @@ function App() {
       setCart({})
       setCartOpen(false)
       setCheckoutConfirmOpen(false)
+      setCheckoutCustomerInfo(emptyCustomerInfo)
+      setCartVerified(false)
     } catch (error) {
       console.error("Failed to invoke resend-email function", error)
       if (error instanceof Error && error.message.trim().length > 0) {
@@ -332,7 +462,7 @@ function App() {
     } finally {
       setCheckoutSubmitting(false)
     }
-  }, [cartItems, cartVerified, checkoutSubmitting, subtotal])
+  }, [buildValidatedCustomerInfo, cartItems, cartVerified, checkoutSubmitting, subtotal])
 
   const continueEditingCart = useCallback(() => {
     setCheckoutConfirmOpen(false)
@@ -459,6 +589,8 @@ function App() {
       <InvoicePage
         invoiceData={invoiceData}
         onReturnToStore={returnToStore}
+        supabaseUrl={SUPABASE_URL}
+        supabaseAnonKey={SUPABASE_ANON_KEY}
       />
     )
   }
@@ -622,13 +754,82 @@ function App() {
       </aside>
 
       {checkoutConfirmOpen ? (
-        <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/45 p-4">
-          <div className="w-full max-w-md rounded-2xl border border-black/10 bg-white p-4 shadow-2xl sm:p-6">
+        <div className="absolute inset-0 z-[60] overflow-y-auto bg-black/45 p-4 sm:p-6">
+          <div className="mx-auto my-auto w-full max-w-md rounded-2xl border border-black/10 bg-white p-4 shadow-2xl sm:p-6 max-h-[calc(100dvh-2rem)] overflow-y-auto">
             <h3 className="text-lg font-semibold">Confirm Your Cart</h3>
             <p className="mt-2 text-sm text-muted-foreground">
               Please review your cart items before checkout. If you still need changes, continue editing to add,
               remove, or update quantities.
             </p>
+
+            <div className="mt-4 grid gap-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="grid min-w-0 gap-1 text-sm">
+                  <span className="text-xs font-medium uppercase">First Name *</span>
+                  <input
+                    type="text"
+                    value={checkoutCustomerInfo.firstName}
+                    onChange={(event) => updateCheckoutCustomerInfo("firstName", event.target.value)}
+                    className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
+                    autoComplete="given-name"
+                  />
+                </label>
+                <label className="grid min-w-0 gap-1 text-sm">
+                  <span className="text-xs font-medium uppercase">Middle Name</span>
+                  <input
+                    type="text"
+                    value={checkoutCustomerInfo.middleName}
+                    onChange={(event) => updateCheckoutCustomerInfo("middleName", event.target.value)}
+                    className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
+                    autoComplete="additional-name"
+                  />
+                </label>
+              </div>
+
+              <label className="grid min-w-0 gap-1 text-sm">
+                <span className="text-xs font-medium uppercase">Last Name *</span>
+                <input
+                  type="text"
+                  value={checkoutCustomerInfo.lastName}
+                  onChange={(event) => updateCheckoutCustomerInfo("lastName", event.target.value)}
+                  className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
+                  autoComplete="family-name"
+                />
+              </label>
+
+              <label className="grid min-w-0 gap-1 text-sm">
+                <span className="text-xs font-medium uppercase">Address *</span>
+                <textarea
+                  value={checkoutCustomerInfo.address}
+                  onChange={(event) => updateCheckoutCustomerInfo("address", event.target.value)}
+                  className="block min-h-20 w-full rounded-lg border border-black/15 px-3 py-2 text-sm"
+                  autoComplete="street-address"
+                />
+              </label>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="grid min-w-0 gap-1 text-sm">
+                  <span className="text-xs font-medium uppercase">Email Address *</span>
+                  <input
+                    type="email"
+                    value={checkoutCustomerInfo.email}
+                    onChange={(event) => updateCheckoutCustomerInfo("email", event.target.value)}
+                    className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
+                    autoComplete="email"
+                  />
+                </label>
+                <label className="grid min-w-0 gap-1 text-sm">
+                  <span className="text-xs font-medium uppercase">Mobile Number *</span>
+                  <input
+                    type="tel"
+                    value={checkoutCustomerInfo.phoneNumber}
+                    onChange={(event) => updateCheckoutCustomerInfo("phoneNumber", event.target.value)}
+                    className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
+                    autoComplete="tel"
+                  />
+                </label>
+              </div>
+            </div>
 
             <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-black/10 p-3">
               <input

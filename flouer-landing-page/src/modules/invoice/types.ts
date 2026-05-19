@@ -6,6 +6,15 @@ export type InvoiceLineItem = {
   lineTotal: number
 }
 
+export type CheckoutCustomerInfo = {
+  firstName: string
+  middleName: string
+  lastName: string
+  address: string
+  email: string
+  phoneNumber: string
+}
+
 export type InvoiceData = {
   invoiceNumber: string
   createdAt: string

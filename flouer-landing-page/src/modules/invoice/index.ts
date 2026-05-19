@@ -5,4 +5,4 @@ export {
   INVOICE_STORAGE_KEY,
   readStoredInvoice,
 } from "@/modules/invoice/invoice.utils"
-export type { InvoiceData, InvoiceLineItem } from "@/modules/invoice/types"
+export type { CheckoutCustomerInfo, InvoiceData, InvoiceLineItem } from "@/modules/invoice/types"
