@@ -6,6 +6,14 @@ import {
   type CarouselApi,
 } from "@/components/ui/carousel"
 import {
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerTitle,
+} from "@/components/ui/drawer"
+import {
   buildInvoice,
   buildOrderEmailHtml,
   INVOICE_STORAGE_KEY,
@@ -14,61 +22,16 @@ import {
   type CheckoutCustomerInfo,
   type InvoiceData,
 } from "@/modules/invoice"
-import product01Img from "@/assets/product-01.png"
-import product02Img from "@/assets/product-02.png"
-import product03Img from "@/assets/product-03.png"
-import product04Img from "@/assets/product-04.png"
+import { BrowsePage, products, type Product } from "@/modules/browse"
 import { useCallback, useEffect, useMemo, useRef, useState, type WheelEvent } from "react"
-
-type Product = {
-  id: string
-  flavor: string
-  description: string
-  image: string
-  price: number
-}
 
 type CartItem = Product & {
   quantity: number
   lineTotal: number
 }
 
-type ViewMode = "storefront" | "invoice"
-
-const products: Product[] = [
-  {
-    id: "product-01",
-    flavor: "Matcha Cheesecake",
-    description:
-      "An earthy and vibrant premium grean tea matcha cookie perfectly balanced by a rich, tangy and sweet cream cheese core.",
-    image: product01Img,
-    price: 55,
-  },
-  {
-    id: "product-02",
-    flavor: "Biscoff",
-    description:
-      "A rich, buttery cookie base infused with Lotus Biscoff spread, white chocolate, and crushed biscuit, filled with a Lotus Biscoff spread, and topped with an authentic Lotus Biscoff biscuit for a perfect caramelized crunch.",
-    image: product02Img,
-    price: 55,
-  },
-  {
-    id: "product-03",
-    flavor: "Red Velvet Cheesecake",
-    description:
-      "A striking, vibrant red velvet cookie with a soft, cocoa-flavored crumb, featuring a decadent, creamy cheesecake filling hidden inside.",
-    image: product03Img,
-    price: 55,
-  },
-  {
-    id: "product-04",
-    flavor: "Chocolate Chip",
-    description:
-      "The classic favorite soft and chewy on the inside, golden crisp on the outside, and loaded with premium dark chocolate chips.",
-    image: product04Img,
-    price: 55,
-  },
-]
+type ViewMode = "storefront" | "browse" | "invoice"
+type CheckoutStep = "notice" | "location" | "details"
 
 const ORDER_EMAIL = "skwakadood@gmail.com"
 const MOBILE_BREAKPOINT = "(max-width: 767px)"
@@ -85,6 +48,11 @@ const priceFormatter = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 })
+const PICKUP_LOCATION_LABEL =
+  "Villar's Residence, Phase 3 Cluster, Legarda St., Mabuhay City Subdivision, Brgy. Mamatid, Cabuyao, Laguna"
+const PICKUP_LOCATION_QUERY = encodeURIComponent(PICKUP_LOCATION_LABEL)
+const PICKUP_MAPS_URL = `https://www.google.com/maps/search/?api=1&query=${PICKUP_LOCATION_QUERY}`
+const PICKUP_MAP_EMBED_URL = `https://www.google.com/maps?q=${PICKUP_LOCATION_QUERY}&z=16&output=embed`
 
 const emptyCustomerInfo: CheckoutCustomerInfo = {
   firstName: "",
@@ -93,6 +61,12 @@ const emptyCustomerInfo: CheckoutCustomerInfo = {
   address: "",
   email: "",
   phoneNumber: "",
+}
+
+const resolveViewModeFromHash = (): ViewMode => {
+  if (window.location.hash === "#invoice") return "invoice"
+  if (window.location.hash === "#browse") return "browse"
+  return "storefront"
 }
 
 function App() {
@@ -104,14 +78,13 @@ function App() {
   const [cart, setCart] = useState<Record<string, number>>({})
   const [cartOpen, setCartOpen] = useState(false)
   const [checkoutConfirmOpen, setCheckoutConfirmOpen] = useState(false)
+  const [checkoutStep, setCheckoutStep] = useState<CheckoutStep>("notice")
   const [cartVerified, setCartVerified] = useState(false)
   const [checkoutCustomerInfo, setCheckoutCustomerInfo] =
     useState<CheckoutCustomerInfo>(emptyCustomerInfo)
   const [checkoutSubmitting, setCheckoutSubmitting] = useState(false)
   const [checkoutError, setCheckoutError] = useState("")
-  const [viewMode, setViewMode] = useState<ViewMode>(() =>
-    window.location.hash === "#invoice" ? "invoice" : "storefront",
-  )
+  const [viewMode, setViewMode] = useState<ViewMode>(() => resolveViewModeFromHash())
   const [invoiceData, setInvoiceData] = useState<InvoiceData | null>(null)
 
   const hideBanner = useCallback(() => {
@@ -119,6 +92,10 @@ function App() {
   }, [])
 
   const showBanner = useCallback(() => {
+    if (viewMode !== "storefront") {
+      window.location.hash = ""
+      setViewMode("storefront")
+    }
     if (isMobile) {
       mobileCarouselApi?.scrollTo(0)
     } else {
@@ -128,7 +105,12 @@ function App() {
     const container = containerRef.current
     if (!container) return
     container.scrollTo({ top: 0, behavior: "smooth" })
-  }, [isMobile, mobileCarouselApi])
+  }, [isMobile, mobileCarouselApi, viewMode])
+
+  const openBrowse = useCallback(() => {
+    window.location.hash = "#browse"
+    setViewMode("browse")
+  }, [])
 
   const scrollToIndex = useCallback(
     (index: number) => {
@@ -227,7 +209,7 @@ function App() {
 
   useEffect(() => {
     const handleHashChange = () => {
-      setViewMode(window.location.hash === "#invoice" ? "invoice" : "storefront")
+      setViewMode(resolveViewModeFromHash())
     }
 
     window.addEventListener("hashchange", handleHashChange)
@@ -285,8 +267,21 @@ function App() {
   const openCheckoutConfirmation = useCallback(() => {
     if (cartItems.length === 0) return
     setCheckoutError("")
+    setCheckoutStep("notice")
     setCheckoutConfirmOpen(true)
   }, [cartItems.length])
+
+  const handleCheckoutConfirmOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (checkoutSubmitting && !nextOpen) return
+      if (!nextOpen) {
+        setCheckoutError("")
+        setCheckoutStep("notice")
+      }
+      setCheckoutConfirmOpen(nextOpen)
+    },
+    [checkoutSubmitting],
+  )
 
   const updateCheckoutCustomerInfo = useCallback(
     (key: keyof CheckoutCustomerInfo, value: string) => {
@@ -465,7 +460,27 @@ function App() {
   }, [buildValidatedCustomerInfo, cartItems, cartVerified, checkoutSubmitting, subtotal])
 
   const continueEditingCart = useCallback(() => {
-    setCheckoutConfirmOpen(false)
+    handleCheckoutConfirmOpenChange(false)
+  }, [handleCheckoutConfirmOpenChange])
+
+  const continueToPickupLocation = useCallback(() => {
+    setCheckoutError("")
+    setCheckoutStep("location")
+  }, [])
+
+  const continueToCheckoutDetails = useCallback(() => {
+    setCheckoutError("")
+    setCheckoutStep("details")
+  }, [])
+
+  const returnToCheckoutNotice = useCallback(() => {
+    setCheckoutError("")
+    setCheckoutStep("notice")
+  }, [])
+
+  const returnToPickupLocation = useCallback(() => {
+    setCheckoutError("")
+    setCheckoutStep("location")
   }, [])
 
   const returnToStore = useCallback(() => {
@@ -609,6 +624,13 @@ function App() {
                 Home
               </Button>
               <Button
+                variant={viewMode === "browse" ? "default" : "ghost"}
+                onClick={openBrowse}
+                className="h-8 px-3 text-xs"
+              >
+                Browse
+              </Button>
+              <Button
                 onClick={() => setCartOpen(true)}
                 className="h-8 px-3 text-xs"
               >
@@ -627,9 +649,12 @@ function App() {
           </div>
         ) : (
           <div className="relative mx-auto flex w-full max-w-6xl items-center rounded-full border border-black/10 bg-white/85 px-5 py-3.5 backdrop-blur">
-            <div className="flex flex-1 items-center justify-start">
+            <div className="flex flex-1 items-center justify-start gap-2">
               <Button variant="ghost" onClick={showBanner}>
                 Home
+              </Button>
+              <Button variant={viewMode === "browse" ? "default" : "ghost"} onClick={openBrowse}>
+                Browse
               </Button>
             </div>
 
@@ -652,7 +677,14 @@ function App() {
         )}
       </nav>
 
-      {isMobile ? (
+      {viewMode === "browse" ? (
+        <BrowsePage
+          products={products}
+          cartQuantities={cart}
+          onAddToCart={addToCart}
+          onOpenCart={() => setCartOpen(true)}
+        />
+      ) : isMobile ? (
         <Carousel
           orientation="vertical"
           opts={{ align: "start", loop: false }}
@@ -753,115 +785,349 @@ function App() {
         </div>
       </aside>
 
-      {checkoutConfirmOpen ? (
-        <div className="absolute inset-0 z-[60] overflow-y-auto bg-black/45 p-4 sm:p-6">
-          <div className="mx-auto my-auto w-full max-w-md rounded-2xl border border-black/10 bg-white p-4 shadow-2xl sm:p-6 max-h-[calc(100dvh-2rem)] overflow-y-auto">
-            <h3 className="text-lg font-semibold">Confirm Your Cart</h3>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Please review your cart items before checkout. If you still need changes, continue editing to add,
-              remove, or update quantities.
-            </p>
-
-            <div className="mt-4 grid gap-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="grid min-w-0 gap-1 text-sm">
-                  <span className="text-xs font-medium uppercase">First Name *</span>
-                  <input
-                    type="text"
-                    value={checkoutCustomerInfo.firstName}
-                    onChange={(event) => updateCheckoutCustomerInfo("firstName", event.target.value)}
-                    className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
-                    autoComplete="given-name"
-                  />
-                </label>
-                <label className="grid min-w-0 gap-1 text-sm">
-                  <span className="text-xs font-medium uppercase">Middle Name</span>
-                  <input
-                    type="text"
-                    value={checkoutCustomerInfo.middleName}
-                    onChange={(event) => updateCheckoutCustomerInfo("middleName", event.target.value)}
-                    className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
-                    autoComplete="additional-name"
-                  />
-                </label>
-              </div>
-
-              <label className="grid min-w-0 gap-1 text-sm">
-                <span className="text-xs font-medium uppercase">Last Name *</span>
-                <input
-                  type="text"
-                  value={checkoutCustomerInfo.lastName}
-                  onChange={(event) => updateCheckoutCustomerInfo("lastName", event.target.value)}
-                  className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
-                  autoComplete="family-name"
-                />
-              </label>
-
-              <label className="grid min-w-0 gap-1 text-sm">
-                <span className="text-xs font-medium uppercase">Address *</span>
-                <textarea
-                  value={checkoutCustomerInfo.address}
-                  onChange={(event) => updateCheckoutCustomerInfo("address", event.target.value)}
-                  className="block min-h-20 w-full rounded-lg border border-black/15 px-3 py-2 text-sm"
-                  autoComplete="street-address"
-                />
-              </label>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <label className="grid min-w-0 gap-1 text-sm">
-                  <span className="text-xs font-medium uppercase">Email Address *</span>
-                  <input
-                    type="email"
-                    value={checkoutCustomerInfo.email}
-                    onChange={(event) => updateCheckoutCustomerInfo("email", event.target.value)}
-                    className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
-                    autoComplete="email"
-                  />
-                </label>
-                <label className="grid min-w-0 gap-1 text-sm">
-                  <span className="text-xs font-medium uppercase">Mobile Number *</span>
-                  <input
-                    type="tel"
-                    value={checkoutCustomerInfo.phoneNumber}
-                    onChange={(event) => updateCheckoutCustomerInfo("phoneNumber", event.target.value)}
-                    className="block h-10 w-full rounded-lg border border-black/15 px-3 text-sm"
-                    autoComplete="tel"
-                  />
-                </label>
-              </div>
+      <Drawer open={checkoutConfirmOpen} onOpenChange={handleCheckoutConfirmOpenChange}>
+        <DrawerContent className="z-[60] h-[92dvh] border-x border-t border-black/10 bg-white shadow-2xl data-[vaul-drawer-direction=bottom]:max-h-[92dvh]">
+          <DrawerHeader className="border-b border-black/10 px-4 pb-4 pt-3 text-left sm:px-6">
+            <div className="mx-auto w-full max-w-6xl">
+              <DrawerTitle className="text-lg font-semibold">Confirm Your Cart</DrawerTitle>
+              <DrawerDescription className="mt-2 max-w-3xl text-sm">
+                {checkoutStep === "notice"
+                  ? "Please read the ordering and delivery information first before continuing."
+                  : checkoutStep === "location"
+                    ? "Review the pickup location on Google Maps before proceeding to your order summary and customer details."
+                    : "Review your order summary and provide your customer details before submitting checkout."}
+              </DrawerDescription>
             </div>
+          </DrawerHeader>
 
-            <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-black/10 p-3">
-              <input
-                type="checkbox"
-                className="mt-0.5 h-4 w-4"
-                checked={cartVerified}
-                onChange={(event) => setCartVerified(event.target.checked)}
-              />
-              <span className="text-sm">I have verified all items and quantities in my cart.</span>
-            </label>
-            {checkoutError ? <p className="mt-3 text-sm text-red-600">{checkoutError}</p> : null}
+          <div className="flex-1 overflow-y-auto">
+            {checkoutStep === "notice" ? (
+              <div className="mx-auto flex min-h-full w-full max-w-5xl items-start px-4 py-6 sm:px-6 lg:items-center lg:py-8">
+                <section className="w-full rounded-[28px] border border-black/10 bg-white shadow-sm">
+                  <div className="border-b border-black/10 px-5 py-5 sm:px-8">
+                    <p className="text-xs font-semibold uppercase tracking-[0.28em] text-muted-foreground">
+                      Step 1 of 3
+                    </p>
+                    <h3 className="mt-3 text-2xl font-semibold tracking-tight text-slate-950">
+                      Please Read Carefully Before Ordering
+                    </h3>
+                    <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-600 sm:text-base">
+                      Review these ordering and delivery rules first. Once you are done, continue to the next step
+                      to view the pickup location on Google Maps.
+                    </p>
+                  </div>
 
-            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
-              <Button
-                variant="outline"
-                onClick={continueEditingCart}
-                disabled={checkoutSubmitting}
-                className="w-full sm:w-auto"
-              >
-                Continue Editing Cart
-              </Button>
-              <Button
-                onClick={proceedToCheckout}
-                disabled={!cartVerified || checkoutSubmitting}
-                className="w-full sm:w-auto"
-              >
-                {checkoutSubmitting ? "Submitting..." : "Proceed To Checkout"}
-              </Button>
-            </div>
+                  <div className="grid gap-4 p-5 sm:p-8 lg:grid-cols-2">
+                    <section className="rounded-3xl border border-amber-200 bg-amber-50 p-5 sm:p-6">
+                      <div className="flex items-center gap-3">
+                        <span className="rounded-full bg-amber-500 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-white">
+                          Important Details
+                        </span>
+                      </div>
+                      <ul className="mt-5 grid gap-3 text-sm leading-relaxed text-amber-950 sm:text-[15px]">
+                        <li>
+                          <span className="font-semibold">On-Hand Items:</span> Very limited stocks are available
+                          and ready to ship immediately. No need to order 2 days in advance.
+                        </li>
+                        <li>
+                          <span className="font-semibold">Made-to-Order:</span> Once on-hand stocks run out, your
+                          orders will be baked completely fresh.
+                        </li>
+                        <li>
+                          <span className="font-semibold">Lead Time:</span> For fresh batches, please place your
+                          orders at least 2 days in advance of your preferred pickup or delivery date.
+                        </li>
+                        <li>
+                          <span className="font-semibold">Freshness Guaranteed:</span> We strictly bake to order
+                          to ensure you get the best quality product.
+                        </li>
+                        <li>
+                          <span className="font-semibold">Pickup Time:</span> Every 11:00 AM PHT.
+                        </li>
+                      </ul>
+                    </section>
+
+                    <section className="rounded-3xl border border-sky-200 bg-sky-50 p-5 sm:p-6">
+                      <div className="flex items-center gap-3">
+                        <span className="rounded-full bg-sky-600 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-white">
+                          Delivery Info
+                        </span>
+                      </div>
+                      <ul className="mt-5 grid gap-3 text-sm leading-relaxed text-sky-950 sm:text-[15px]">
+                        <li>
+                          <span className="font-semibold">Free Delivery:</span> Exclusive for orders around
+                          Mabuhay City Subdivision, specifically Phase 3, 5, and 6.
+                        </li>
+                        <li>
+                          <span className="font-semibold">Outside Areas:</span> Buyers outside these phases may
+                          book their own preferred courier such as Grab or Lalamove.
+                        </li>
+                        <li>
+                          <span className="font-semibold">Pick-up Location:</span> Villar&apos;s Residence via
+                          Google Maps, {PICKUP_LOCATION_LABEL.replace("Villar's Residence, ", "")}.
+                        </li>
+                      </ul>
+                    </section>
+                  </div>
+                </section>
+              </div>
+            ) : checkoutStep === "location" ? (
+              <div className="mx-auto flex min-h-full w-full max-w-6xl items-start px-4 py-6 sm:px-6 lg:items-center lg:py-8">
+                <section className="w-full rounded-[28px] border border-black/10 bg-white shadow-sm">
+                  <div className="border-b border-black/10 px-5 py-5 sm:px-8">
+                    <p className="text-xs font-semibold uppercase tracking-[0.28em] text-muted-foreground">
+                      Step 2 of 3
+                    </p>
+                    <h3 className="mt-3 text-2xl font-semibold tracking-tight text-slate-950">
+                      Pick-Up Location
+                    </h3>
+                    <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-600 sm:text-base">
+                      Check the exact pickup point before moving forward. You can open the location directly in
+                      Google Maps if you want turn-by-turn directions.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-5 p-5 sm:p-8 lg:grid-cols-[minmax(320px,0.92fr)_minmax(0,1.08fr)]">
+                    <section className="rounded-3xl border border-sky-200 bg-sky-50 p-5 sm:p-6">
+                      <span className="rounded-full bg-sky-600 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-white">
+                        Google Maps Location
+                      </span>
+                      <h4 className="mt-5 text-xl font-semibold text-sky-950">Villar&apos;s Residence</h4>
+                      <p className="mt-3 text-sm leading-relaxed text-sky-950 sm:text-[15px]">
+                        {PICKUP_LOCATION_LABEL}
+                      </p>
+                      <div className="mt-5 grid gap-3 text-sm leading-relaxed text-sky-950">
+                        <p>
+                          <span className="font-semibold">Pickup schedule:</span> Every 11:00 AM PHT.
+                        </p>
+                        <p>
+                          <span className="font-semibold">Reminder:</span> Please use this location for self-pickup
+                          and for arranging third-party couriers outside the free delivery zones.
+                        </p>
+                      </div>
+                      <a
+                        href={PICKUP_MAPS_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-6 inline-flex h-11 items-center justify-center rounded-xl bg-sky-600 px-4 text-sm font-medium text-white transition-colors hover:bg-sky-700"
+                      >
+                        Open In Google Maps
+                      </a>
+                    </section>
+
+                    <section className="overflow-hidden rounded-3xl border border-black/10 bg-stone-50 shadow-inner">
+                      <iframe
+                        title="Pick-up location map"
+                        src={PICKUP_MAP_EMBED_URL}
+                        className="h-[360px] w-full border-0 sm:h-[420px] lg:h-full lg:min-h-[440px]"
+                        loading="lazy"
+                        referrerPolicy="no-referrer-when-downgrade"
+                      />
+                    </section>
+                  </div>
+                </section>
+              </div>
+            ) : (
+              <div className="mx-auto grid w-full max-w-6xl gap-5 px-4 py-5 sm:px-6 lg:grid-cols-[minmax(320px,0.44fr)_minmax(0,0.56fr)] lg:items-start">
+                <aside className="lg:sticky lg:top-0">
+                  <section className="rounded-3xl border border-black/10 bg-white p-5 shadow-sm sm:p-6">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">
+                          Step 3 of 3
+                        </p>
+                        <h3 className="mt-3 text-xl font-semibold text-slate-950">Order Summary</h3>
+                        <p className="mt-2 text-sm leading-relaxed text-slate-600">
+                          Double-check quantities and totals before submitting your order.
+                        </p>
+                      </div>
+                      <p className="rounded-full bg-stone-100 px-3 py-1 text-sm font-semibold text-slate-900">
+                        {cartItems.length} {cartItems.length === 1 ? "item" : "items"}
+                      </p>
+                    </div>
+
+                    <div className="mt-5 grid gap-3">
+                      {cartItems.map((item) => (
+                        <div
+                          key={item.id}
+                          className="flex items-start justify-between gap-3 rounded-2xl border border-black/10 bg-stone-50 p-4"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-slate-900">{item.flavor}</p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {item.quantity} x {priceFormatter.format(item.price)}
+                            </p>
+                          </div>
+                          <p className="shrink-0 text-sm font-semibold text-slate-900">
+                            {priceFormatter.format(item.lineTotal)}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="mt-5 flex items-center justify-between border-t border-black/10 pt-4">
+                      <span className="text-sm uppercase tracking-[0.18em] text-slate-600">Subtotal</span>
+                      <span className="text-lg font-semibold text-slate-950">{priceFormatter.format(subtotal)}</span>
+                    </div>
+                  </section>
+                </aside>
+
+                <section className="rounded-3xl border border-black/10 bg-white p-5 shadow-sm sm:p-6">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">
+                      Customer Details
+                    </p>
+                    <p className="mt-2 text-sm leading-relaxed text-slate-600">
+                      Provide your contact information so the order can be confirmed and coordinated correctly.
+                    </p>
+                  </div>
+
+                  <div className="mt-5 grid gap-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="grid min-w-0 gap-1.5 text-sm">
+                        <span className="text-xs font-medium uppercase">First Name *</span>
+                        <input
+                          type="text"
+                          value={checkoutCustomerInfo.firstName}
+                          onChange={(event) => updateCheckoutCustomerInfo("firstName", event.target.value)}
+                          className="block h-11 w-full rounded-xl border border-black/15 px-3 text-sm"
+                          autoComplete="given-name"
+                        />
+                      </label>
+                      <label className="grid min-w-0 gap-1.5 text-sm">
+                        <span className="text-xs font-medium uppercase">Middle Name</span>
+                        <input
+                          type="text"
+                          value={checkoutCustomerInfo.middleName}
+                          onChange={(event) => updateCheckoutCustomerInfo("middleName", event.target.value)}
+                          className="block h-11 w-full rounded-xl border border-black/15 px-3 text-sm"
+                          autoComplete="additional-name"
+                        />
+                      </label>
+                    </div>
+
+                    <label className="grid min-w-0 gap-1.5 text-sm">
+                      <span className="text-xs font-medium uppercase">Last Name *</span>
+                      <input
+                        type="text"
+                        value={checkoutCustomerInfo.lastName}
+                        onChange={(event) => updateCheckoutCustomerInfo("lastName", event.target.value)}
+                        className="block h-11 w-full rounded-xl border border-black/15 px-3 text-sm"
+                        autoComplete="family-name"
+                      />
+                    </label>
+
+                    <label className="grid min-w-0 gap-1.5 text-sm">
+                      <span className="text-xs font-medium uppercase">Address *</span>
+                      <textarea
+                        value={checkoutCustomerInfo.address}
+                        onChange={(event) => updateCheckoutCustomerInfo("address", event.target.value)}
+                        className="block min-h-32 w-full resize-none rounded-xl border border-black/15 px-3 py-3 text-sm"
+                        autoComplete="street-address"
+                      />
+                    </label>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="grid min-w-0 gap-1.5 text-sm">
+                        <span className="text-xs font-medium uppercase">Email Address *</span>
+                        <input
+                          type="email"
+                          value={checkoutCustomerInfo.email}
+                          onChange={(event) => updateCheckoutCustomerInfo("email", event.target.value)}
+                          className="block h-11 w-full rounded-xl border border-black/15 px-3 text-sm"
+                          autoComplete="email"
+                        />
+                      </label>
+                      <label className="grid min-w-0 gap-1.5 text-sm">
+                        <span className="text-xs font-medium uppercase">Mobile Number *</span>
+                        <input
+                          type="tel"
+                          value={checkoutCustomerInfo.phoneNumber}
+                          onChange={(event) => updateCheckoutCustomerInfo("phoneNumber", event.target.value)}
+                          className="block h-11 w-full rounded-xl border border-black/15 px-3 text-sm"
+                          autoComplete="tel"
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-2xl border border-black/10 bg-stone-50 p-4">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4"
+                      checked={cartVerified}
+                      onChange={(event) => setCartVerified(event.target.checked)}
+                    />
+                    <span className="text-sm leading-relaxed">
+                      I have verified all items, quantities, and customer details in my cart.
+                    </span>
+                  </label>
+
+                  {checkoutError ? <p className="mt-4 text-sm text-red-600">{checkoutError}</p> : null}
+                </section>
+              </div>
+            )}
           </div>
-        </div>
-      ) : null}
+
+          <DrawerFooter className="border-t border-black/10 bg-white/95 px-4 py-4 sm:flex-row sm:flex-wrap sm:justify-end sm:px-6">
+            {checkoutStep === "notice" ? (
+              <>
+                <Button
+                  variant="outline"
+                  onClick={continueEditingCart}
+                  disabled={checkoutSubmitting}
+                  className="w-full sm:w-auto"
+                >
+                  Continue Editing Cart
+                </Button>
+                <Button onClick={continueToPickupLocation} className="w-full sm:w-auto">
+                  Next: Pickup Location
+                </Button>
+              </>
+            ) : checkoutStep === "location" ? (
+              <>
+                <Button
+                  variant="outline"
+                  onClick={returnToCheckoutNotice}
+                  disabled={checkoutSubmitting}
+                  className="w-full sm:w-auto"
+                >
+                  Back To Order Info
+                </Button>
+                <Button onClick={continueToCheckoutDetails} className="w-full sm:w-auto">
+                  Next: Order Summary
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  variant="outline"
+                  onClick={returnToPickupLocation}
+                  disabled={checkoutSubmitting}
+                  className="w-full sm:w-auto"
+                >
+                  Back To Pickup Location
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={continueEditingCart}
+                  disabled={checkoutSubmitting}
+                  className="w-full sm:w-auto"
+                >
+                  Continue Editing Cart
+                </Button>
+                <Button
+                  onClick={proceedToCheckout}
+                  disabled={!cartVerified || checkoutSubmitting}
+                  className="w-full sm:w-auto"
+                >
+                  {checkoutSubmitting ? "Submitting..." : "Proceed To Checkout"}
+                </Button>
+              </>
+            )}
+          </DrawerFooter>
+        </DrawerContent>
+      </Drawer>
     </main>
   )
 }
